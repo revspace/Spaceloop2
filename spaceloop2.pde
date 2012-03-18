@@ -6,7 +6,6 @@
 
 #define MAXSENSORS 64
 #define MAXZONES   32
-#define MAXPERZONE 32
 
 byte addr[8];  /* buffer */
 byte data[12]; /* buffer */
@@ -31,7 +30,7 @@ sensorid ids[MAXSENSORS];
 
 bool blinkstate = false; 
 char zonenamebuf[256];  // Actual buffer, copied from EEPROM
-char* zonenames[MAXPERZONE];    // Pointers to strings in zonenamebuf
+char* zonenames[MAXZONES];    // Pointers to strings in zonenamebuf
 
 
 extern int __bss_end;
