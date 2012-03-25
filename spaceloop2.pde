@@ -6,19 +6,25 @@
 
 #define MAXSENSORS 40
 #define MAXZONES   32
+#define BUSES      2
+#define TEXTLINES  2
+#define TEXTCOLS   16
 
 byte addr[8];  /* buffer */
 byte data[12]; /* buffer */
 
 TM1638        tm(/*dio*/ 2, /*clk*/ 3, /*stb0*/ 4);
-OneWire       ds(7);
-OneWire       dsprogram(8);
+OneWire       buses[2] = {
+    OneWire(7),
+    OneWire(8)
+};
+#define dsprogram buses[1]
 LiquidCrystal lcd(A0, A1, A2, A3, A4, A5);
 
 const byte ledA = 10;
 const byte ledB = 11;
 
-byte addrs[MAXSENSORS][8];
+byte addrs[MAXSENSORS][9];  // OneWire ignores 9th byte; we use it for bus-idx
 byte nsensors = 0;
 byte wantedsensors = 0;
 
@@ -101,6 +107,11 @@ float celsius(byte d[12]) {
     return ret;
 }
 
+bool anything_on_bus(OneWire ds) {
+    ds.reset_search();
+    byte dummy[8];
+    return ds.search(dummy);
+}
 
 void scan(bool complain = 0) {
     sensorid stored[MAXSENSORS];
@@ -109,19 +120,23 @@ void scan(bool complain = 0) {
     nsensors = 0;
     wantedsensors = 0;
 
-    ds.reset_search();
-    while (ds.search(addr)) {
-        if (OneWire::crc8(addr, 7) != addr[7]) continue;
-        for (byte i = 0; i < 8; i++) addrs[nsensors][i] = addr[i];
+    for (byte b = 0; b < BUSES; b++) {
+        OneWire ds = buses[b];
 
-        ds.write(0xBE);  // read scratchpad
-        for (byte i = 0; i < 9; i++) data[i] = ds.read();
-        ids[nsensors].zone = data[2];
-        ids[nsensors].nr   = data[3];
+        ds.reset_search();
+        while (ds.search(addr)) {
+            if (OneWire::crc8(addr, 7) != addr[7]) continue;
+            for (byte i = 0; i < 8; i++) addrs[nsensors][i] = addr[i];
+            addrs[nsensors][8] = b;
 
-        nsensors++;
+            ds.write(0xBE);  // read scratchpad
+            for (byte i = 0; i < 9; i++) data[i] = ds.read();
+            ids[nsensors].zone = data[2];
+            ids[nsensors].nr   = data[3];
+
+            nsensors++;
+        }
     }
-    Serial.print(nsensors); Serial.println(" sensors found.\n");
 
     wantedsensors = nsensors;
     for (byte i = 0; i < MAXSENSORS; i++) {
@@ -149,7 +164,7 @@ void scan(bool complain = 0) {
                 lcd.print(" ");
                 lcd.print(id.nr & 0x7F, DEC);
             }
-            delay(2500);
+            delay(1500);
         }
     }
 
@@ -165,9 +180,27 @@ void scan(bool complain = 0) {
 void program() {
     lcd.clear();
     lcd.print("PROGRAMMING MODE");
+    lcd.setCursor(0, 1);
+    lcd.print(" 2 + 7 = cancel");
+    tm.setLEDs(0x42);
     redgreen(2);
 
+    // Begin with empty bus to avoid re-programming production sensors
+    while (anything_on_bus(dsprogram)) {
+        tm.setDisplayToString("unplug  ");
+        if (tm.getButtons() == 0x42) return;
+    }
+
+    tm.setDisplayToString("insert  ");
+    dsprogram.reset_search();
+    while (!dsprogram.search(addr)) {
+        if (tm.getButtons() == 0x42) return;
+    }
+
     if (OneWire::crc8(addr, 7) != addr[7]) return;
+
+    lcd.setCursor(0, 1);
+    lcd.print("               ");  // clear
 
     dsprogram.reset();
     dsprogram.select(addr);
@@ -178,7 +211,7 @@ void program() {
     unsigned char zone = data[2];  // user byte 1
     unsigned char nr   = data[3];  // user byte 2
 
-    zone = reverse_bits(zone) & 0xF1;
+    zone = reverse_bits(zone) & 0xF8;
     byte keys = 0;
     while (! (keys & 0x02)) {
         unsigned short disp = reverse_bits(zone);
@@ -221,22 +254,17 @@ void program() {
     dsprogram.write(0x48);  // copy scratchpad to eeprom
 
     tm.setDisplayToString("unplug  ");
-
-    while (data[8] == OneWire::crc8(data, 8)) {
-        dsprogram.reset();
-        dsprogram.select(addr);
-        dsprogram.write(0xBE);  // read scratchpad
-        for (byte i = 0; i < 9; i++) data[i] = dsprogram.read();
-    }
+    while (anything_on_bus(dsprogram));
 
     tm.setDisplayToString("yay     ");
-    delay(3000);
+    delay(1500);
     tm.clearDisplay();
 }
 
 void setup() {
     Serial.begin(9600);
-    lcd.begin(20, 2);
+    Serial.println("INIT");
+    lcd.begin(TEXTCOLS, TEXTLINES);
     lcd.print("Hoi wereld");
 
     EEPROM_readAnything(0, zonenamebuf);
@@ -259,8 +287,6 @@ void loop() {
     static unsigned long nextprint = millis();
 
     // Serial.println(get_free_memory());
-    dsprogram.reset_search();
-    if (dsprogram.search(addr)) program();
 
     if (millis() >= blinkflip) {
         blinkflip = millis() + (nsensors == wantedsensors ? 500 : 2000);
@@ -275,11 +301,14 @@ void loop() {
 
     if (nsensors != wantedsensors) scan();
 
-    ds.reset();
-    ds.skip();
-    ds.write(0x44);  // convert temperature
-    while (!ds.read());  // wait until finished
-
+    for (byte i = 0; i < BUSES; i++) {
+        OneWire ds = buses[i];
+        ds.reset();
+        ds.skip();
+        ds.write(0x44);  // convert temperature
+    }
+    for (byte i = 0; i < BUSES; i++)
+        while (!buses[i].read());  // wait until finished
 
     byte numfound = 0;
     byte numtemp = 0;   // numfound - num85 :)
@@ -293,6 +322,7 @@ void loop() {
         if (n >= nsensors) continue;
 
         sensorid id = ids[n];
+        OneWire ds = buses[ addrs[n][8] ];
         ds.reset();
         ds.select(addrs[n]);
         ds.write(0xbe);  // read scratchpad
@@ -343,14 +373,16 @@ void loop() {
             for (byte n = 0; n < wantedsensors; n++) {
                 sensorid id = ids[n];
                 if (!found[n] && (id.nr & 0x80)) {
-                    lcd.setCursor(0, y++);
+                    lcd.setCursor(0, y);
                     lcd.print(zonenames[ id.zone ]);
                     if (id.nr & 0x7F) { // Skip if 0
                         lcd.print(" ");
                         lcd.print(id.nr & 0x7F, DEC);
                     }
+                    if (++y >= TEXTLINES) break;
                 }
             }
+            display_numtext(wantedsensors - numfound, "OPeN");
         }
     } else {
         if (anychange) iteration = 0;
@@ -374,6 +406,10 @@ void loop() {
         tm.setDisplayToDecNumber(nsensors, 0);
     else if (keys == 0x20)
         tm.setDisplayToDecNumber(wantedsensors, 0);
+    else if (keys == 0x81) {
+        program();
+        lcd.clear();
+    }
     else if (keys == 0x18 && numfound < wantedsensors) {
         Serial.println("aoeuaoeu");
         sensorid store[MAXSENSORS];
@@ -394,9 +430,11 @@ void loop() {
         while (tm.getButtons());
         delay(500); // debounce
     }
-    else if (!keys)
+    else if (!keys && numfound == wantedsensors)
         tm.clearDisplay();
 
 //    delay(1000);
 
 }
+
+// vim: ft=c
