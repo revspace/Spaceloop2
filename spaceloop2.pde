@@ -4,7 +4,7 @@
 #include "EEPROM.h"
 #include "AnythingEEPROM.h"
 
-#define MAXSENSORS 64
+#define MAXSENSORS 40
 #define MAXZONES   32
 
 byte addr[8];  /* buffer */
@@ -162,6 +162,78 @@ void scan(bool complain = 0) {
     }
 }
 
+void program() {
+    lcd.clear();
+    lcd.print("PROGRAMMING MODE");
+    redgreen(2);
+
+    if (OneWire::crc8(addr, 7) != addr[7]) return;
+
+    dsprogram.reset();
+    dsprogram.select(addr);
+    dsprogram.write(0xBE);  // read scratchpad
+    for (byte i = 0; i < 9; i++) data[i] = dsprogram.read();
+    if (data[8] != OneWire::crc8(data, 8)) return;
+
+    unsigned char zone = data[2];  // user byte 1
+    unsigned char nr   = data[3];  // user byte 2
+
+    zone = reverse_bits(zone) & 0xF1;
+    byte keys = 0;
+    while (! (keys & 0x02)) {
+        unsigned short disp = reverse_bits(zone);
+        display_numtext(disp, "ZONe");
+        tm.setLEDs(zone + 0x0200);
+        keys = tm.getButtons();
+        if (keys) delay(300);  // debounce;
+        zone ^= (keys & 0xF8);
+    }
+    zone = reverse_bits(zone);
+
+    while (tm.getButtons() & 0x02);
+    delay(300); // debounce
+
+    nr = reverse_bits(nr) & 0xF9;
+    keys = 0;
+    while (! (keys & 0x02)) {
+        unsigned short disp = reverse_bits(nr);
+        if (disp & 0x80) display_numtext(disp & 0x7F, "S-nr");
+        else             display_numtext(disp & 0x7F, "T-nr");
+        tm.setLEDs(nr + 0x0200);
+        keys = tm.getButtons();
+        if (keys) delay(300);  // debounce;
+        nr ^= (keys & 0xF9);
+    }
+    nr = reverse_bits(nr);
+    delay(300); // debounce
+
+    tm.setDisplayToString("done    "); delay(1000);
+
+    dsprogram.reset();
+    dsprogram.select(addr);
+    dsprogram.write(0x4e);  // write scratchpad
+    dsprogram.write(zone);  // user byte 1
+    dsprogram.write(nr);    // user byte 2
+    dsprogram.write(0x1f);  // config: 9 bits resolution
+
+    dsprogram.reset();
+    dsprogram.select(addr);
+    dsprogram.write(0x48);  // copy scratchpad to eeprom
+
+    tm.setDisplayToString("unplug  ");
+
+    while (data[8] == OneWire::crc8(data, 8)) {
+        dsprogram.reset();
+        dsprogram.select(addr);
+        dsprogram.write(0xBE);  // read scratchpad
+        for (byte i = 0; i < 9; i++) data[i] = dsprogram.read();
+    }
+
+    tm.setDisplayToString("yay     ");
+    delay(3000);
+    tm.clearDisplay();
+}
+
 void setup() {
     Serial.begin(9600);
     lcd.begin(20, 2);
@@ -188,78 +260,7 @@ void loop() {
 
     // Serial.println(get_free_memory());
     dsprogram.reset_search();
-
-    while (dsprogram.search(addr)) {
-        lcd.clear();
-        lcd.print("PROGRAMMING MODE");
-        redgreen(2);
-
-        if (OneWire::crc8(addr, 7) != addr[7]) continue;
-
-        dsprogram.reset();
-        dsprogram.select(addr);
-        dsprogram.write(0xBE);  // read scratchpad
-        for (byte i = 0; i < 9; i++) data[i] = dsprogram.read();
-        if (data[8] != OneWire::crc8(data, 8)) continue;
-
-        unsigned char zone = data[2];  // user byte 1
-        unsigned char nr   = data[3];  // user byte 2
-
-        zone = reverse_bits(zone) & 0xF1;
-        byte keys = 0;
-        while (! (keys & 0x02)) {
-            unsigned short disp = reverse_bits(zone);
-            display_numtext(disp, "ZONe");
-            tm.setLEDs(zone + 0x0200);
-            keys = tm.getButtons();
-            if (keys) delay(300);  // debounce;
-            zone ^= (keys & 0xF8);
-        }
-        zone = reverse_bits(zone);
-
-        while (tm.getButtons() & 0x02);
-        delay(300); // debounce
-
-        nr = reverse_bits(nr) & 0xF9;
-        keys = 0;
-        while (! (keys & 0x02)) {
-            unsigned short disp = reverse_bits(nr);
-            if (disp & 0x80) display_numtext(disp & 0x7F, "S-nr");
-            else             display_numtext(disp & 0x7F, "T-nr");
-            tm.setLEDs(nr + 0x0200);
-            keys = tm.getButtons();
-            if (keys) delay(300);  // debounce;
-            nr ^= (keys & 0xF9);
-        }
-        nr = reverse_bits(nr);
-        delay(300); // debounce
-
-        tm.setDisplayToString("done    "); delay(1000);
-
-        dsprogram.reset();
-        dsprogram.select(addr);
-        dsprogram.write(0x4e);  // write scratchpad
-        dsprogram.write(zone);  // user byte 1
-        dsprogram.write(nr);    // user byte 2
-        dsprogram.write(0x1f);  // config: 9 bits resolution
-
-        dsprogram.reset();
-        dsprogram.select(addr);
-        dsprogram.write(0x48);  // copy scratchpad to eeprom
-
-        tm.setDisplayToString("unplug  ");
-
-        while (data[8] == OneWire::crc8(data, 8)) {
-            dsprogram.reset();
-            dsprogram.select(addr);
-            dsprogram.write(0xBE);  // read scratchpad
-            for (byte i = 0; i < 9; i++) data[i] = dsprogram.read();
-        }
-
-        tm.setDisplayToString("yay     ");
-        delay(3000);
-        tm.clearDisplay();
-    }
+    if (dsprogram.search(addr)) program();
 
     if (millis() >= blinkflip) {
         blinkflip = millis() + (nsensors == wantedsensors ? 500 : 2000);
@@ -281,6 +282,7 @@ void loop() {
 
 
     byte numfound = 0;
+    byte numtemp = 0;   // numfound - num85 :)
     float sum = 0;
     float min = 150;
     float max = -30;
@@ -310,6 +312,7 @@ void loop() {
             sum += c;
             if (c < min) min = c;
             if (c > max) max = c;
+            numtemp++;
         }
 
         found[n] = 1;
@@ -353,7 +356,7 @@ void loop() {
         if (anychange) iteration = 0;
         redgreen(0);
         if (!(iteration++ % 100)) {
-            float avg = sum / numfound;
+            float avg = sum / numtemp;
             lcd.clear();
             lcd.print("min="); lcd.print(min, 0);
             lcd.print(" avg="); lcd.print(avg, 1);
