@@ -330,7 +330,7 @@ void loop() {
         if (data[8] != OneWire::crc8(data, 8)) continue;
 
         float c = celsius(data);
-        if (c != 85) {
+        if (c < 50) {
             if (printtemp) {
                 Serial.print(zonenames[ id.zone ]);
                 Serial.print("("); Serial.print(id.zone, DEC);
