@@ -7,8 +7,8 @@
 #define MAXSENSORS 40
 #define MAXZONES   32
 #define BUSES      2
-#define TEXTLINES  2
-#define TEXTCOLS   16
+#define TEXTLINES  4
+#define TEXTCOLS   20
 
 byte addr[8];  /* buffer */
 byte data[12]; /* buffer */
@@ -155,6 +155,7 @@ void scan(bool complain = 0) {
         ids[wantedsensors].nr   = id.nr;
         wantedsensors++;
 
+#if 0
         if (complain) {
             lcd.clear();
             lcd.print("MISSING SENSOR");
@@ -166,6 +167,7 @@ void scan(bool complain = 0) {
             }
             delay(1500);
         }
+#endif
     }
 
     if (nsensors == wantedsensors) {
@@ -315,9 +317,14 @@ void loop() {
     float sum = 0;
     float min = 150;
     float max = -30;
+    sensorid minid = { 0, 0 };
+    sensorid maxid = { 0, 0 };
     byte found[MAXSENSORS];
 
     for (byte n = 0; n < wantedsensors; n++) {
+        byte tries = 0;
+        
+        RETRY:
         found[n] = 0;
         if (n >= nsensors) continue;
 
@@ -327,7 +334,11 @@ void loop() {
         ds.select(addrs[n]);
         ds.write(0xbe);  // read scratchpad
         for (byte i = 0; i < 9; i++) data[i] = ds.read();
-        if (data[8] != OneWire::crc8(data, 8)) continue;
+        if (data[8] != OneWire::crc8(data, 8)) {
+            delay(10);
+            if (tries++ < 3) goto RETRY;
+            continue;
+        }
 
         float c = celsius(data);
         if (c < 50) {
@@ -340,8 +351,8 @@ void loop() {
                 Serial.println(c, 1);
             }
             sum += c;
-            if (c < min) min = c;
-            if (c > max) max = c;
+            if (c < min) { min = c; minid = id; }
+            if (c > max) { max = c; maxid = id; }
             numtemp++;
         }
 
@@ -365,24 +376,35 @@ void loop() {
         prevfound[n] = found[n];
     }
 
+    if (anychange) delay(100);
+
     if (numfound < wantedsensors) {
         redgreen(1);
+        byte numopen = wantedsensors - numfound;
         if (anychange) {
             lcd.clear();
             byte y = 0;
-            for (byte n = 0; n < wantedsensors; n++) {
-                sensorid id = ids[n];
-                if (!found[n] && (id.nr & 0x80)) {
-                    lcd.setCursor(0, y);
-                    lcd.print(zonenames[ id.zone ]);
-                    if (id.nr & 0x7F) { // Skip if 0
-                        lcd.print(" ");
-                        lcd.print(id.nr & 0x7F, DEC);
-                    }
-                    if (++y >= TEXTLINES) break;
-                }
+            if (numopen < TEXTLINES) {
+                lcd.print("CLOSE BEFORE LEAVING");
+                y++;
             }
-            display_numtext(wantedsensors - numfound, "OPeN");
+            for (byte n = 0; n < wantedsensors; n++) {
+                if (found[n]) continue;
+                sensorid id = ids[n];
+                if (! (id.nr & 0x80)) continue;
+
+                lcd.setCursor(0, y);
+                lcd.print(zonenames[ id.zone ]);
+                if (id.nr & 0x7F) { // Skip if 0
+                    lcd.print(" ");
+                    lcd.print(id.nr & 0x7F, DEC);
+                }
+                if (n >= nsensors) { // Missing sensor
+                    lcd.print(" \xa5");
+                }
+                if (++y >= TEXTLINES) break;
+            }
+            display_numtext(numopen, "OPeN");
         }
     } else {
         if (anychange) iteration = 0;
@@ -390,10 +412,15 @@ void loop() {
         if (!(iteration++ % 100)) {
             float avg = sum / numtemp;
             lcd.clear();
-            lcd.print("min="); lcd.print(min, 0);
-            lcd.print(" avg="); lcd.print(avg, 1);
+            lcd.print("\xFF TEMPERATURE \xFF");
             lcd.setCursor(0, 1);
-            lcd.print("max="); lcd.print(max, 0);
+            lcd.print("L="); lcd.print(min, 0); lcd.print("\xdf" " ");
+            lcd.print(zonenames[minid.zone]);
+            lcd.setCursor(0, 2);
+            lcd.print("H="); lcd.print(max, 0); lcd.print("\xdf" " ");
+            lcd.print(zonenames[maxid.zone]);
+            lcd.setCursor(0, 3);
+            lcd.print("Average: "); lcd.print(avg, 1); lcd.print(" \xdf" "C");
         }
     }
 
@@ -433,8 +460,7 @@ void loop() {
     else if (!keys && numfound == wantedsensors)
         tm.clearDisplay();
 
-//    delay(1000);
-
+    delay(20);
 }
 
 // vim: ft=c
