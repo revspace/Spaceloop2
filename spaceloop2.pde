@@ -4,10 +4,11 @@
 #include "TM1638.h"
 #include "EEPROM.h"
 #include "AnythingEEPROM.h"
+#include <avr/pgmspace.h>
 
 #define MAXSENSORS 40
 #define MAXZONES   32
-#define BUSES      2
+#define BUSES      4
 #define TEXTLINES  4
 #define TEXTCOLS   20
 
@@ -15,11 +16,14 @@ byte addr[8];  /* buffer */
 byte data[12]; /* buffer */
 
 TM1638        tm(/*dio*/ 2, /*clk*/ 3, /*stb0*/ 4);
-OneWire       buses[2] = {
+OneWire       buses[BUSES] = {
+    OneWire(6),
     OneWire(7),
-    OneWire(8)
+    OneWire(8),
+    OneWire(9)
 };
-#define dsprogram buses[1]
+#define dsprogram buses[2]
+
 LiquidCrystal lcd(A0, A1, A2, A3, A4, A5);
 
 const byte ledA = 10;
@@ -31,7 +35,6 @@ byte wantedsensors = 0;
 
 sensorid ids[MAXSENSORS];
 
-bool blinkstate = false; 
 char zonenamebuf[256];  // Actual buffer, copied from EEPROM
 char* zonenames[MAXZONES];    // Pointers to strings in zonenamebuf
 
@@ -57,19 +60,46 @@ char reverse_bits (unsigned char byte) {
     return ret;
 }
 
-void redgreen (char b) {
-    if (b == 0) {
+char state;  // 0: closed, 1: open, 2: leds off
+char ledblinkstate;
+unsigned long lednext;
+unsigned long ledinterval;
+
+unsigned int iteration = 0;
+
+void set_state(char b) {
+    state = b;
+    lednext = 0;
+    led();
+    if (state == 0) closed_view();
+    else if (state == 1) open_view();
+}
+
+void led() {
+    if (millis() < lednext) return;
+    ledblinkstate = !ledblinkstate;
+    lednext = millis() + ledinterval;
+
+    if (state == 0) {
         tm.setLEDs(0xFF00);
+        digitalWrite(13, HIGH);
         digitalWrite(ledA, LOW);
         digitalWrite(ledB, HIGH);
-    } else if (b == 1) {
-        tm.setLEDs(blinkstate ? 0x18E0 : 0x1807);
+    } else if (state == 1) {
+        tm.setLEDs(ledblinkstate ? 0x18E0 : 0x1807);
+        digitalWrite(13, ledblinkstate ? HIGH : LOW);
         digitalWrite(ledA, HIGH);
-        digitalWrite(ledB, blinkstate ? HIGH : LOW);
+        digitalWrite(ledB, ledblinkstate ? HIGH : LOW);
     } else {
+        digitalWrite(13, LOW);
         digitalWrite(ledA, LOW);
         digitalWrite(ledB, LOW);
     }
+}
+
+void mydelay(unsigned long d) {
+    d += millis();
+    while (d >= millis()) led();
 }
 
 void display_numtext (unsigned char num, char* text) {
@@ -139,7 +169,6 @@ void scan(bool complain = 0) {
             for (byte i = 0; i < 8; i++) addrs[nsensors][i] = addr[i];
             addrs[nsensors][8] = b;
             ids[nsensors++] = id;
-//            nsensors++;
         }
     }
 
@@ -149,9 +178,6 @@ void scan(bool complain = 0) {
         if (id.zone == 0 && id.nr == 0) break;
         if (known_sensor(id)) continue;
         ids[wantedsensors++] = id;
-//        ids[wantedsensors].zone = id.zone;
-//        ids[wantedsensors].nr   = id.nr;
-//        wantedsensors++;
     }
 
     if (nsensors == wantedsensors) {
@@ -169,7 +195,6 @@ void program() {
     lcd.setCursor(0, 1);
     lcd.print("2 + 7 = annuleren");
     tm.setLEDs(0x42);
-    redgreen(2);
 
     // Begin with empty bus to avoid re-programming production sensors
     while (anything_on_bus(dsprogram)) {
@@ -233,7 +258,7 @@ void program() {
     dsprogram.write(0x4e);  // write scratchpad
     dsprogram.write(zone);  // user byte 1
     dsprogram.write(nr);    // user byte 2
-    dsprogram.write(0x1f);  // config: 9 bits resolution
+    dsprogram.write(0x3f);  // config: 9 bits resolution
 
     dsprogram.reset();
     dsprogram.select(addr);
@@ -244,7 +269,6 @@ void program() {
 
     tm.setDisplayToString("yay     ");
     delay(1500);
-    tm.clearDisplay();
 }
 
 void print_sensor(Print &target, sensorid id, bool verbose = 0) {
@@ -254,10 +278,35 @@ void print_sensor(Print &target, sensorid id, bool verbose = 0) {
         target.print(id.zone, DEC);
         target.print(") ");
         target.print(id.nr & 0x80 ? "s" : "t");
-    } else {
+        target.print(id.nr & 0x1F, DEC);
+    } else if (id.nr & 0x1F) {
         target.print(" ");
+        target.print(id.nr & 0x1F, DEC);
     }
-    target.print(id.nr & 0x1F, DEC);
+}
+
+byte found[MAXSENSORS];
+byte prevnotfound[MAXSENSORS];
+byte numopen;
+float min = -199;
+float max = -199;
+float avg;
+sensorid minid = { 0, 0 };
+sensorid maxid = { 0, 0 };
+
+void closed_view() {
+    if (min == -199 && max == -199) return;  // Haven't seen any temperatures yet
+    lcd.clear();
+    lcd.print("\xFF TEMPERATUUR \xFF");
+    lcd.setCursor(0, 1);
+    lcd.print("L="); lcd.print(min, 0); lcd.print("\xdf" " ");
+    lcd.print(zonenames[minid.zone]);
+    lcd.setCursor(0, 2);
+    lcd.print("H="); lcd.print(max, 0); lcd.print("\xdf" " ");
+    lcd.print(zonenames[maxid.zone]);
+    lcd.setCursor(0, 3);
+    lcd.print("Gemiddeld: "); lcd.print(avg, 1); lcd.print(" \xdf" "C");
+    tm.clearDisplay();
 }
 
 void setup() {
@@ -271,26 +320,40 @@ void setup() {
     for (int i = 0; i < 255; i++)
         if (zonenamebuf[i] == '\0') zonenames[++index] = &zonenamebuf[i] + 1;
 
-
+    pinMode(13, OUTPUT);
     pinMode(ledA, OUTPUT);
     pinMode(ledB, OUTPUT);
 
     scan(1);
     tm.clearDisplay();
+    set_state(0);
 }
 
 
-void loop() {
-    static unsigned int iteration = 0;
-    static unsigned long blinkflip = millis();
-    static unsigned long nextprint = millis();
-
-    // Serial.println(get_free_memory());
-
-    if (millis() >= blinkflip) {
-        blinkflip = millis() + (nsensors == wantedsensors ? 500 : 2000);
-        blinkstate = !blinkstate;
+void open_view() {
+    byte y = 0;
+    lcd.clear();
+    if (numopen < TEXTLINES) {
+        lcd.print("SLUITEN VOOR VERTREK");
+        y++;
     }
+    for (byte n = 0; n < wantedsensors; n++) {
+        if (found[n]) continue;
+        sensorid id = ids[n];
+
+        lcd.setCursor(0, y);
+        print_sensor(lcd, id, 0);
+        if (n >= nsensors) { // Missing sensor
+            lcd.print(" \xa5");
+        }
+        if (++y >= TEXTLINES) break;
+    }
+    if (numopen) display_numtext(numopen, "OPeN");
+    else tm.clearDisplay();
+}
+
+void loop() {
+    static unsigned long nextprint = millis();
 
     bool printtemp = 0;
     if (millis() >= nextprint) {
@@ -298,7 +361,12 @@ void loop() {
         printtemp = 1;
     }
 
-    if (nsensors != wantedsensors) scan();
+    if (nsensors != wantedsensors) {
+        scan();
+        ledinterval = 2000;
+    } else {
+        ledinterval = 500;
+    }
 
     for (byte i = 0; i < BUSES; i++) {
         OneWire ds = buses[i];
@@ -307,16 +375,16 @@ void loop() {
         ds.write(0x44);  // convert temperature
     }
     for (byte i = 0; i < BUSES; i++)
-        while (!buses[i].read());  // wait until finished
+        while (!buses[i].read()) {
+            // wait until finished converting
+            led();
+        };
 
     byte numfound = 0;
     byte numtemp = 0;   // numfound - num85 :)
     float sum = 0;
-    float min = 150;
-    float max = -30;
-    sensorid minid = { 0, 0 };
-    sensorid maxid = { 0, 0 };
-    byte found[MAXSENSORS];
+    min = 150;
+    max = -30;
 
     for (byte n = 0; n < wantedsensors; n++) {
         byte tries = 0;
@@ -332,7 +400,7 @@ void loop() {
         ds.write(0xbe);  // read scratchpad
         for (byte i = 0; i < 9; i++) data[i] = ds.read();
         if (data[8] != OneWire::crc8(data, 8)) {
-            delay(10);
+            mydelay(10);
             if (tries++ < 3) goto RETRY;
             continue;
         }
@@ -342,80 +410,47 @@ void loop() {
             if (printtemp) {
                 print_sensor(Serial, id, 1);
                 Serial.print(": ");
-                Serial.println(c, 1);
+                Serial.println(c, 2);
             }
             sum += c;
-            if (c < min) { min = c; minid = id; }
-            if (c > max) { max = c; maxid = id; }
+            if (id.zone != 20) {  // HACK: skip spacestate
+                if (c < min) { min = c; minid = id; }
+                if (c > max) { max = c; maxid = id; }
+            }
             numtemp++;
         }
 
         found[n] = 1;
         numfound++;
     }
+    avg = sum / numtemp;
+    numopen = wantedsensors - numfound;
 
     if (printtemp) Serial.println();
 
-    static byte prevnotfound[MAXSENSORS];
     bool anychange = 0;
-    for (byte n = 0; n < nsensors; n++) {
+    for (byte n = 0; n < wantedsensors; n++) {
+        sensorid id = ids[n];
         if (found[n] == prevnotfound[n]) {
-            sensorid id = ids[n];
             anychange = 1;
             Serial.print("[");
             print_sensor(Serial, id, 0);
             Serial.println(found[n] ? " dicht]" : " open]");
         }
         prevnotfound[n] = !found[n];
-    }
 
-    if (anychange) delay(100);
-
-    if (numfound < wantedsensors) {
-        redgreen(1);
-        byte numopen = wantedsensors - numfound;
-        if (anychange) {
-            lcd.clear();
-            byte y = 0;
-            if (numopen < TEXTLINES) {
-                lcd.print("CLOSE BEFORE LEAVING");
-                y++;
-            }
-            for (byte n = 0; n < wantedsensors; n++) {
-                if (found[n]) continue;
-                sensorid id = ids[n];
-                if (! (id.nr & 0x80)) continue;
-
-                lcd.setCursor(0, y);
-                lcd.print(zonenames[ id.zone ]);
-                if (id.nr & 0x7F) { // Skip if 0
-                    lcd.print(" ");
-                    lcd.print(id.nr & 0x7F, DEC);
-                }
-                if (n >= nsensors) { // Missing sensor
-                    lcd.print(" \xa5");
-                }
-                if (++y >= TEXTLINES) break;
-            }
-            display_numtext(numopen, "OPeN");
-        }
-    } else {
-        if (anychange) iteration = 0;
-        redgreen(0);
-        if (!(iteration++ % 100)) {
-            float avg = sum / numtemp;
-            lcd.clear();
-            lcd.print("\xFF TEMPERATUUR \xFF");
-            lcd.setCursor(0, 1);
-            lcd.print("L="); lcd.print(min, 0); lcd.print("\xdf" " ");
-            lcd.print(zonenames[minid.zone]);
-            lcd.setCursor(0, 2);
-            lcd.print("H="); lcd.print(max, 0); lcd.print("\xdf" " ");
-            lcd.print(zonenames[maxid.zone]);
-            lcd.setCursor(0, 3);
-            lcd.print("Gemiddeld: "); lcd.print(avg, 1); lcd.print(" \xdf" "C");
+        // If it's a T type, pretend for the rest of this loop that it is "closed"
+        if (!found[n] && !(id.nr & 0x80)) {
+            found[n] = 1;
+            numopen--;
         }
     }
+
+    if (anychange) {
+        set_state(numopen ? 1 : 0);
+    }
+
+    if (!numopen && printtemp) closed_view();
 
     byte keys = tm.getButtons();
     if (keys == 0x01)
@@ -427,14 +462,16 @@ void loop() {
     else if (keys == 0x20)
         tm.setDisplayToDecNumber(wantedsensors, 0);
     else if (keys == 0x81) {
+        byte oldstate = state;
+        set_state(2);
         program();
-        lcd.clear();
+        set_state(oldstate);
     }
     else if (keys == 0x18 && numfound < wantedsensors) {
         sensorid store[MAXSENSORS];
         byte nstored = 0;
         for (byte i = 0; i < wantedsensors; i++) {
-            if (i < nsensors && found[i]) {
+            if (i < nsensors && (found[i] || ids[i].nr & 0x80)) {
                 store[nstored].zone = ids[i].zone;
                 store[nstored].nr   = ids[i].nr;
                 nstored++;
@@ -452,12 +489,12 @@ void loop() {
         nsensors = 0; // force re-learning
         scan();
         while (tm.getButtons());
-        delay(500); // debounce
+        mydelay(500); // debounce
         nextprint = millis();
     }
     else if (!keys && numfound == wantedsensors)
         tm.clearDisplay();
-    delay(20);
+    mydelay(20);
 }
 
 // vim: ft=c

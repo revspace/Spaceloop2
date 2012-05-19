@@ -22,8 +22,8 @@ void setup () {
         /*16*/ "Stookhok\0"
         /*17*/ "Nooduitgang\0"
         /*18*/ "Dubbele deur\0"
-        /*19*/ "\0"
-        /*20*/ "\0"
+        /*19*/ "Voordeur\0"
+        /*20*/ "RevSpace\0"
         /*21*/ "\0"
         /*22*/ "\0"
         /*23*/ "\0"
@@ -36,7 +36,7 @@ void setup () {
         /*30*/ "\0"
         /*31*/ "\0"
     );
-    EEPROM_writeAnything(256, "\0\0");
+    EEPROM_writeAnything(256, "\x10\x81\0\0");
 }
 
 
