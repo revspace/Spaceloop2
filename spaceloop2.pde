@@ -60,6 +60,8 @@ char reverse_bits (unsigned char byte) {
     return ret;
 }
 
+
+
 char state;  // 0: closed, 1: open, 2: leds off
 char ledblinkstate;
 unsigned long lednext;
@@ -285,8 +287,13 @@ void print_sensor(Print &target, sensorid id, bool verbose = 0) {
     }
 }
 
-byte found[MAXSENSORS];
-byte prevnotfound[MAXSENSORS];
+byte found[MAXSENSORS / 8];
+byte prevnotfound[MAXSENSORS / 8];
+
+void clear_bit(byte* array, byte index) {        array[index/8] &= ~(1 << (index%8)); }
+void   set_bit(byte* array, byte index) {        array[index/8] |=  (1 << (index%8)); }
+bool  test_bit(byte* array, byte index) { return array[index/8] &   (1 << (index%8)); }
+
 byte numopen;
 float min = -199;
 float max = -199;
@@ -338,7 +345,7 @@ void open_view() {
         y++;
     }
     for (byte n = 0; n < wantedsensors; n++) {
-        if (found[n]) continue;
+        if (test_bit[found, n]) continue;
         sensorid id = ids[n];
 
         lcd.setCursor(0, y);
@@ -390,7 +397,7 @@ void loop() {
         byte tries = 0;
 
         RETRY:
-        found[n] = 0;
+        clear_bit(found, n);
         if (n >= nsensors) continue;
 
         sensorid id = ids[n];
@@ -420,7 +427,7 @@ void loop() {
             numtemp++;
         }
 
-        found[n] = 1;
+        set_bit(found, n);
         numfound++;
     }
     avg = sum / numtemp;
@@ -431,17 +438,19 @@ void loop() {
     bool anychange = 0;
     for (byte n = 0; n < wantedsensors; n++) {
         sensorid id = ids[n];
-        if (found[n] == prevnotfound[n]) {
+        bool found_n = test_bit(found, n);
+        if (found_n == test_bit(prevnotfound, n)) {
             anychange = 1;
             Serial.print("[");
             print_sensor(Serial, id, 0);
-            Serial.println(found[n] ? " dicht]" : " open]");
+            Serial.println(test_bit(found, n) ? " dicht]" : " open]");
         }
-        prevnotfound[n] = !found[n];
+        if (found_n) clear_bit(prevnotfound, n);
+        else           set_bit(prevnotfound, n);
 
         // If it's a T type, pretend for the rest of this loop that it is "closed"
-        if (!found[n] && !(id.nr & 0x80)) {
-            found[n] = 1;
+        if (!found_n && !(id.nr & 0x80)) {
+            set_bit(found, n);
             numopen--;
         }
     }
@@ -471,7 +480,7 @@ void loop() {
         sensorid store[MAXSENSORS];
         byte nstored = 0;
         for (byte i = 0; i < wantedsensors; i++) {
-            if (i < nsensors && (found[i] || ids[i].nr & 0x80)) {
+            if (i < nsensors && test_bit(found, i)) {
                 store[nstored].zone = ids[i].zone;
                 store[nstored].nr   = ids[i].nr;
                 nstored++;
