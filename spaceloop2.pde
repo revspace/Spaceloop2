@@ -345,7 +345,7 @@ void open_view() {
         y++;
     }
     for (byte n = 0; n < wantedsensors; n++) {
-        if (test_bit[found, n]) continue;
+        if (test_bit(found, n)) continue;
         sensorid id = ids[n];
 
         lcd.setCursor(0, y);
