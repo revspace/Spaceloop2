@@ -45,7 +45,7 @@ byte seen;     // Number of sensors actually encountered on any bus since reset
 byte current;  // Number of sensors currently on their respective busses
 byte missing;  // Number of "s"-sensors currently missing (open)
 
-char state;     // 0: closed, 1: open, -2: leds off (program or init)
+char state;     // 0: closed, 1: open, -1: leds off (program or init)
 bool seen_all;  // 0: keep searching (slow), 1: don't search (fast)
 
 char zonenamebuf[256];     // Actual buffer, copied from EEPROM
