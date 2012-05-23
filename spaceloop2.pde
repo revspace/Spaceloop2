@@ -67,7 +67,7 @@ void   set_bit(byte* array, byte index) {        array[index/8] |=  (1 << (index
 bool  test_bit(byte* array, byte index) { return array[index/8] &   (1 << (index%8)); }
 
 char reverse_bits (unsigned char byte) {
-    unsigned char ret;
+    unsigned char ret = 0;
     for ( unsigned char i = 0; i < 8; ++i ) {
         ret = ( ret << 1 ) | ( byte & 1 );
         byte >>= 1;
@@ -113,7 +113,7 @@ void mydelay(unsigned long d) {
     while (d >= millis()) led();
 }
 
-void display_numtext (unsigned char num, char* text) {
+void display_numtext (unsigned char num, const char* text) {
     char numstr[9] = "";
     itoa(num, numstr, 10);
     char str[9] = "        ";
@@ -322,7 +322,7 @@ void setup() {
     tm.clearDisplay();
 
     EEPROM_readAnything(0, zonenamebuf);
-    char index = 0;
+    byte index = 0;
     for (int i = 0; i < 255; i++)
         if (zonenamebuf[i] == '\0') zonenames[++index] = &zonenamebuf[i] + 1;
 
