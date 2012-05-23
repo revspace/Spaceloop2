@@ -29,14 +29,27 @@ LiquidCrystal lcd(A0, A1, A2, A3, A4, A5);
 const byte ledA = 10;
 const byte ledB = 11;
 
-byte addrs[MAXSENSORS][9];  // OneWire ignores 9th byte; we use it for bus-idx
-byte nsensors = 0;
-byte wantedsensors = 0;
+byte      addrs[ MAXSENSORS ][9];  // 9th byte is bus-index; OneWire ignores it
+sensorid    ids[ MAXSENSORS ];
+byte    present[(MAXSENSORS + 7) / 8];
+byte       good[(MAXSENSORS + 7) / 8];
 
-sensorid ids[MAXSENSORS];
+float min = -199;
+float max = -199;
+float avg;
+sensorid minid = { 0, 0 };
+sensorid maxid = { 0, 0 };
 
-char zonenamebuf[256];  // Actual buffer, copied from EEPROM
-char* zonenames[MAXZONES];    // Pointers to strings in zonenamebuf
+byte known;    // Number of sensors known (from EEPROM or search)
+byte seen;     // Number of sensors actually encountered on any bus since reset
+byte current;  // Number of sensors currently on their respective busses
+byte missing;  // Number of "s"-sensors currently missing (open)
+
+char state;     // 0: closed, 1: open, -2: leds off (program or init)
+bool seen_all;  // 0: keep searching (slow), 1: don't search (fast)
+
+char zonenamebuf[256];     // Actual buffer, copied from EEPROM
+char* zonenames[MAXZONES]; // Pointers to strings in zonenamebuf
 
 extern int __bss_end;
 extern void *__brkval;
@@ -49,6 +62,9 @@ int get_free_memory() {
     return free_memory;
 }
 
+void clear_bit(byte* array, byte index) {        array[index/8] &= ~(1 << (index%8)); }
+void   set_bit(byte* array, byte index) {        array[index/8] |=  (1 << (index%8)); }
+bool  test_bit(byte* array, byte index) { return array[index/8] &   (1 << (index%8)); }
 
 char reverse_bits (unsigned char byte) {
     unsigned char ret;
@@ -60,27 +76,20 @@ char reverse_bits (unsigned char byte) {
     return ret;
 }
 
-
-
-char state;  // 0: closed, 1: open, 2: leds off
-char ledblinkstate;
-unsigned long lednext;
-unsigned long ledinterval;
-
-unsigned int iteration = 0;
-
 void set_state(char b) {
     state = b;
-    lednext = 0;
     led();
     if (state == 0) closed_view();
     else if (state == 1) open_view();
 }
 
 void led() {
+    static bool ledblinkstate;
+    static unsigned long lednext;
+
     if (millis() < lednext) return;
     ledblinkstate = !ledblinkstate;
-    lednext = millis() + ledinterval;
+    lednext = millis() + (seen_all ? 500 : 2000);
 
     if (state == 0) {
         tm.setLEDs(0xFF00);
@@ -141,18 +150,18 @@ bool anything_on_bus(OneWire ds) {
     return ds.search(dummy);
 }
 
-bool known_sensor(sensorid id) {
-    if (!nsensors) return 0;
-    for (byte j = 0; j < nsensors; j++)
+bool seen_sensor(sensorid id) {
+    if (!seen) return 0;
+    for (byte j = 0; j < seen; j++)
         if (id.zone == ids[j].zone && id.nr == ids[j].nr) return 1;
     return 0;
 }
 
-void scan(bool complain = 0) {
+void search() {
     sensorid stored[MAXSENSORS];
     EEPROM_readAnything(256, stored);
 
-    wantedsensors = 0;
+    known = 0;
 
     for (byte b = 0; b < BUSES; b++) {
         OneWire ds = buses[b];
@@ -166,26 +175,28 @@ void scan(bool complain = 0) {
             sensorid id;
             id.zone = data[2];
             id.nr   = data[3];
-            if (known_sensor(id)) continue;
+            if (seen_sensor(id)) continue;
 
-            for (byte i = 0; i < 8; i++) addrs[nsensors][i] = addr[i];
-            addrs[nsensors][8] = b;
-            ids[nsensors++] = id;
+            for (byte i = 0; i < 8; i++) addrs[seen][i] = addr[i];
+            addrs[seen][8] = b;
+            ids[seen++] = id;
         }
     }
 
-    wantedsensors = nsensors;
+    known = seen;
+    // Append any sensors that are known (in EEPROM), but not yet seen.
     for (byte i = 0; i < MAXSENSORS; i++) {
         sensorid id = stored[i];
         if (id.zone == 0 && id.nr == 0) break;
-        if (known_sensor(id)) continue;
-        ids[wantedsensors++] = id;
+        if (seen_sensor(id)) continue;
+        ids[known++] = id;
     }
 
-    if (nsensors == wantedsensors) {
-        if (nsensors < MAXSENSORS) {
-            ids[nsensors].zone = 0;
-            ids[nsensors].nr   = 0;
+    if (seen == known) {
+        seen_all = true;
+        if (seen < MAXSENSORS) {
+            ids[seen].zone = 0;
+            ids[seen].nr   = 0;
         }
         EEPROM_writeAnything(256, ids);
     }
@@ -287,20 +298,6 @@ void print_sensor(Print &target, sensorid id, bool verbose = 0) {
     }
 }
 
-byte found[MAXSENSORS / 8];
-byte prevnotfound[MAXSENSORS / 8];
-
-void clear_bit(byte* array, byte index) {        array[index/8] &= ~(1 << (index%8)); }
-void   set_bit(byte* array, byte index) {        array[index/8] |=  (1 << (index%8)); }
-bool  test_bit(byte* array, byte index) { return array[index/8] &   (1 << (index%8)); }
-
-byte numopen;
-float min = -199;
-float max = -199;
-float avg;
-sensorid minid = { 0, 0 };
-sensorid maxid = { 0, 0 };
-
 void closed_view() {
     if (min == -199 && max == -199) return;  // Haven't seen any temperatures yet
     lcd.clear();
@@ -319,8 +316,10 @@ void closed_view() {
 void setup() {
     Serial.begin(9600);
     Serial.println("[Reset]");
+
     lcd.begin(TEXTCOLS, TEXTLINES);
     lcd.print("Hoi wereld");
+    tm.clearDisplay();
 
     EEPROM_readAnything(0, zonenamebuf);
     char index = 0;
@@ -331,49 +330,40 @@ void setup() {
     pinMode(ledA, OUTPUT);
     pinMode(ledB, OUTPUT);
 
-    scan(1);
-    tm.clearDisplay();
-    set_state(0);
+    set_state(-1);
 }
-
 
 void open_view() {
     byte y = 0;
     lcd.clear();
-    if (numopen < TEXTLINES) {
+    if (missing < TEXTLINES) {
+        // Enough room for a descriptive line
         lcd.print("SLUITEN VOOR VERTREK");
         y++;
     }
-    for (byte n = 0; n < wantedsensors; n++) {
-        if (test_bit(found, n)) continue;
+    for (byte n = 0; n < known; n++) {
+        if (test_bit(good, n)) continue;
         sensorid id = ids[n];
 
         lcd.setCursor(0, y);
         print_sensor(lcd, id, 0);
-        if (n >= nsensors) { // Missing sensor
-            lcd.print(" \xa5");
+        if (n >= seen) {
+            lcd.print(" \xa5");  // &middot;
         }
         if (++y >= TEXTLINES) break;
     }
-    if (numopen) display_numtext(numopen, "OPeN");
+    if (missing) display_numtext(missing, "OPeN");
     else tm.clearDisplay();
 }
 
-void loop() {
-    static unsigned long nextprint = millis();
+void probe(bool print_temperatures) {
+    current = 0;        // Counts up
+    missing = known;    // Counts down
 
-    bool printtemp = 0;
-    if (millis() >= nextprint) {
-        nextprint = millis() + 30000;
-        printtemp = 1;
-    }
-
-    if (nsensors != wantedsensors) {
-        scan();
-        ledinterval = 2000;
-    } else {
-        ledinterval = 500;
-    }
+    byte numtemp = 0;   // Number of valid temperatures, for average
+    float sum = 0;
+    min = 150;
+    max = -30;
 
     for (byte i = 0; i < BUSES; i++) {
         OneWire ds = buses[i];
@@ -381,26 +371,26 @@ void loop() {
         ds.skip();
         ds.write(0x44);  // convert temperature
     }
-    for (byte i = 0; i < BUSES; i++)
-        while (!buses[i].read()) {
-            // wait until finished converting
-            led();
-        };
+    for (byte i = 0; i < BUSES; i++) {
+        // wait until finished converting
+        while (!buses[i].read()) led();
+    };
 
-    byte numfound = 0;
-    byte numtemp = 0;   // numfound - num85 :)
-    float sum = 0;
-    min = 150;
-    max = -30;
-
-    for (byte n = 0; n < wantedsensors; n++) {
+    for (byte n = 0; n < known; n++) {
+        sensorid id = ids[n];
         byte tries = 0;
 
         RETRY:
-        clear_bit(found, n);
-        if (n >= nsensors) continue;
+        clear_bit(present, n);
+        clear_bit(good, n);
+        if (id.nr & 0x80) {
+            // T-sensors are always good enough and we don't really miss them
+            set_bit(good, n);
+            missing--;
+        }
 
-        sensorid id = ids[n];
+        if (n >= seen) continue;  // Don't probe if address unknown
+
         OneWire ds = buses[ addrs[n][8] ];
         ds.reset();
         ds.select(addrs[n]);
@@ -414,7 +404,7 @@ void loop() {
 
         float c = celsius(data);
         if (c < 50) {
-            if (printtemp) {
+            if (print_temperatures) {
                 print_sensor(Serial, id, 1);
                 Serial.print(": ");
                 Serial.println(c, 2);
@@ -427,63 +417,69 @@ void loop() {
             numtemp++;
         }
 
-        set_bit(found, n);
-        numfound++;
+        set_bit(present, n);
+        set_bit(good, n);
+        current++;
+        missing--;
     }
     avg = sum / numtemp;
-    numopen = wantedsensors - numfound;
+}
 
-    if (printtemp) Serial.println();
-
-    bool anychange = 0;
-    for (byte n = 0; n < wantedsensors; n++) {
-        sensorid id = ids[n];
-        bool found_n = test_bit(found, n);
-        if (found_n == test_bit(prevnotfound, n)) {
-            anychange = 1;
+void compare(bool printchanges) {
+    static byte prev_absent[(MAXSENSORS + 7) / 8];
+    for (byte n = 0; n < known; n++) {
+        bool present = test_bit(good, n);
+        if (printchanges && present == test_bit(prev_absent, n)) {
             Serial.print("[");
-            print_sensor(Serial, id, 0);
-            Serial.println(test_bit(found, n) ? " dicht]" : " open]");
+            print_sensor(Serial, ids[n], 0);
+            Serial.println(present ? " dicht]" : " open]");
         }
-        if (found_n) clear_bit(prevnotfound, n);
-        else           set_bit(prevnotfound, n);
+        if (present) clear_bit(prev_absent, n);
+        else           set_bit(prev_absent, n);
+    }
+}
 
-        // If it's a T type, pretend for the rest of this loop that it is "closed"
-        if (!found_n && !(id.nr & 0x80)) {
-            set_bit(found, n);
-            numopen--;
-        }
+void loop() {
+    static unsigned long nextprint = millis();
+
+    bool printtemp = 0;
+    if (millis() >= nextprint) {
+        nextprint = millis() + 30000;
+        printtemp = 1;
+        Serial.println();
     }
 
-    if (anychange) {
-        set_state(numopen ? 1 : 0);
-    }
+    if (!seen_all) search();
 
-    if (!numopen && printtemp) closed_view();
+    probe(printtemp); // Sets: good, min, max, avg, current, missing.
+    compare(1);       // Prints changes.
+
+    byte new_state = missing ? 1 : 0;
+    if (new_state != state) set_state(new_state);
+
+    if (!missing && printtemp) closed_view();
 
     byte keys = tm.getButtons();
     if (keys == 0x01)
         tm.setDisplayToDecNumber(get_free_memory(), 0);
     else if (keys == 0x02)
-        tm.setDisplayToDecNumber(numfound, 0);
+        tm.setDisplayToDecNumber(current, 0);
     else if (keys == 0x04)
-        tm.setDisplayToDecNumber(nsensors, 0);
+        tm.setDisplayToDecNumber(seen, 0);
     else if (keys == 0x20)
-        tm.setDisplayToDecNumber(wantedsensors, 0);
+        tm.setDisplayToDecNumber(known, 0);
     else if (keys == 0x81) {
         byte oldstate = state;
-        set_state(2);
+        set_state(-1);
         program();
         set_state(oldstate);
     }
-    else if (keys == 0x18 && numfound < wantedsensors) {
+    else if (keys == 0x18 && missing) {
         sensorid store[MAXSENSORS];
         byte nstored = 0;
-        for (byte i = 0; i < wantedsensors; i++) {
-            if (i < nsensors && test_bit(found, i)) {
-                store[nstored].zone = ids[i].zone;
-                store[nstored].nr   = ids[i].nr;
-                nstored++;
+        for (byte i = 0; i < known; i++) {
+            if (i < seen && test_bit(good, i)) {
+                store[nstored++] = ids[i];
             } else {
                 Serial.print("[Sensor ");
                 print_sensor(Serial, ids[i], 1);
@@ -495,13 +491,15 @@ void loop() {
             store[nstored].nr   = 0;
         }
         EEPROM_writeAnything(256, store);
-        nsensors = 0; // force re-learning
-        scan();
+        seen = 0; // Force re-learning
+        search();
+        probe(0);
+        compare(0);  // Just refill "prevabsent"; don't print anything
         while (tm.getButtons());
         mydelay(500); // debounce
         nextprint = millis();
     }
-    else if (!keys && numfound == wantedsensors)
+    else if (!keys && !missing)
         tm.clearDisplay();
     mydelay(20);
 }
