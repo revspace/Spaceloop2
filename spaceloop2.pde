@@ -40,15 +40,14 @@ float avg;
 sensorid minid = { 0, 0 };
 sensorid maxid = { 0, 0 };
 
-byte known;    // Number of sensors known (from EEPROM or search)
-byte seen;     // Number of sensors actually encountered on any bus since reset
-byte current;  // Number of sensors currently on their respective busses
-byte missing;  // Number of "s"-sensors currently missing (open)
+int known = 0;    // Number of sensors known (from EEPROM or search)
+int seen = 0;     // Number of sensors actually encountered on any bus since reset
+int current = 0;  // Number of sensors currently on their respective busses
+int missing = 0;  // Number of "s"-sensors currently missing (open)
 
 char state;     // 0: closed, 1: open, -1: leds off (program or init)
-bool seen_all;  // 0: keep searching (slow), 1: don't search (fast)
+bool seen_all = 0;  // 0: keep searching (slow), 1: don't search (fast)
 
-char zonenamebuf[256];     // Actual buffer, copied from EEPROM
 char* zonenames[MAXZONES]; // Pointers to strings in zonenamebuf
 
 extern int __bss_end;
@@ -184,6 +183,7 @@ void search() {
     }
 
     known = seen;
+
     // Append any sensors that are known (in EEPROM), but not yet seen.
     for (byte i = 0; i < MAXSENSORS; i++) {
         sensorid id = stored[i];
@@ -314,6 +314,8 @@ void closed_view() {
 }
 
 void setup() {
+    static char zonenamebuf[256];     // Actual buffer, copied from EEPROM
+
     Serial.begin(9600);
     Serial.println("[Reset]");
 
@@ -323,14 +325,19 @@ void setup() {
 
     EEPROM_readAnything(0, zonenamebuf);
     byte index = 0;
-    for (int i = 0; i < 255; i++)
-        if (zonenamebuf[i] == '\0') zonenames[++index] = &zonenamebuf[i] + 1;
+    for (int i = 0; i < 255; i++) {
+        if (zonenamebuf[i] == '\0' and index < MAXZONES) {
+            zonenames[++index] = &zonenamebuf[i] + 1;
+        }
+    }
 
     pinMode(13, OUTPUT);
     pinMode(ledA, OUTPUT);
     pinMode(ledB, OUTPUT);
 
     set_state(-1);
+
+    search();
 }
 
 void open_view() {
@@ -358,7 +365,6 @@ void open_view() {
 
 void probe(bool print_temperatures) {
     current = 0;        // Counts up
-    missing = known;    // Counts down
 
     byte numtemp = 0;   // Number of valid temperatures, for average
     float sum = 0;
@@ -376,6 +382,7 @@ void probe(bool print_temperatures) {
         while (!buses[i].read()) led();
     };
 
+    int t_not_found = 0;
     for (byte n = 0; n < known; n++) {
         sensorid id = ids[n];
         byte tries = 0;
@@ -383,10 +390,9 @@ void probe(bool print_temperatures) {
         RETRY:
         clear_bit(present, n);
         clear_bit(good, n);
-        if (id.nr & 0x80) {
+        if (! (id.nr & 0x80)) {
             // T-sensors are always good enough and we don't really miss them
-            set_bit(good, n);
-            missing--;
+            t_not_found++;
         }
 
         if (n >= seen) continue;  // Don't probe if address unknown
@@ -417,11 +423,15 @@ void probe(bool print_temperatures) {
             numtemp++;
         }
 
+        if (! (id.nr & 0x80)) {
+            t_not_found--;
+        }
+
         set_bit(present, n);
         set_bit(good, n);
         current++;
-        missing--;
     }
+    missing = known - current - t_not_found;
     avg = sum / numtemp;
 }
 
